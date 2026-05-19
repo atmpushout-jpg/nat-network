@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Project state (per-deployment, not source)
+orchestrator/state/
+trajectories/
+reports/baseline_*.md
+
+# Cached datasets (large; auto-redownloaded)
+tasks/cache/*.csv
+tasks/cache/*.jsonl
+
+# Local per-host config / secrets
+.consent
+*.key
+*.pem
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Internal handoff artifacts (not for public repo)
+HANDOFF.md
+MEMORY/
