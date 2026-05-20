@@ -359,6 +359,253 @@ def _render_joiner_bat(req) -> str:
     return _JOINER_BAT.format(origin=_origin(req)).replace("\n", "\r\n")
 
 
+_JOINER_COMMAND = r"""#!/bin/bash
+# NAT NETWORK macOS one-click joiner. Double-click in Finder to run.
+set -u
+ORCH="{origin}"
+WORKDIR="$HOME/.nat-network"
+MODEL="qwen2.5-coder:1.5b"
+
+clear
+cat <<EOF
+
+  ============================================================
+                      N A T   N E T W O R K
+                         Node Joiner (macOS)
+  ============================================================
+
+  Server: $ORCH
+  Workdir: $WORKDIR
+
+EOF
+
+if [ -f "$WORKDIR/.consent" ]; then
+  echo "  [Consent on file from $WORKDIR/.consent]"
+else
+  cat <<EOF
+  Before you join, here is what this does:
+
+    * Installs Homebrew (if missing), then Ollama via brew
+    * Downloads a local AI model (~1 GB) you can use anytime
+    * Opens a worker window that runs AI-safety evaluation jobs
+      against your local Ollama, posting verdict labels back to NAT
+    * Uses CPU/RAM/network while the worker window is open
+
+  How to stop:
+    * Close the "NAT NETWORK NODE" Terminal window any time
+    * The local AI model stays installed and usable standalone
+
+  Workload note: jobs include AdvBench safety probes. The local
+  model only refuses or responds; nothing leaves your device
+  beyond the verdict label.
+
+EOF
+  read -p "  Type Y to consent and join, or anything else to abort: " ans
+  if [ "${{ans:-}}" != "Y" ] && [ "${{ans:-}}" != "y" ]; then
+    echo "Aborted. Nothing installed."
+    exit 1
+  fi
+  mkdir -p "$WORKDIR"
+  printf 'consent_at=%s\norchestrator=%s\n' "$(date)" "$ORCH" > "$WORKDIR/.consent"
+fi
+
+echo
+echo "  [1/5] Checking Homebrew..."
+if ! command -v brew >/dev/null 2>&1; then
+  echo "        Not found. Installing Homebrew (may ask for your sudo password)..."
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  if [ $? -ne 0 ]; then
+    echo "        [!] Homebrew install failed. Install manually from https://brew.sh then re-run."
+    read -p "Press Enter to exit..." _
+    exit 1
+  fi
+  # PATH for Apple Silicon
+  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
+  # PATH for Intel Macs
+  if [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"; fi
+fi
+echo "        OK"
+
+echo "  [2/5] Checking Ollama..."
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "        Not found. Installing via brew..."
+  brew install ollama || {{ echo "        [!] brew install ollama failed"; read -p "Press Enter to exit..." _; exit 1; }}
+fi
+echo "        OK"
+
+echo "  [3/5] Ensuring Ollama daemon is running..."
+if ! curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+  brew services start ollama >/dev/null 2>&1 || (nohup ollama serve >/dev/null 2>&1 &)
+  sleep 4
+fi
+echo "        OK"
+
+echo "  [4/5] Ensuring model $MODEL is pulled (~1 GB on first run)..."
+if ! ollama list 2>/dev/null | grep -q "^$MODEL"; then
+  ollama pull "$MODEL" || {{ echo "[!] model pull failed"; read -p "Press Enter to exit..." _; exit 1; }}
+else
+  echo "        OK"
+fi
+
+echo "  [5/5] Downloading worker code..."
+mkdir -p "$WORKDIR"
+curl -fsSL "$ORCH/worker.py" -o "$WORKDIR/worker.py" || {{ echo "[!] worker.py download failed - is $ORCH reachable?"; read -p "Press Enter to exit..." _; exit 1; }}
+curl -fsSL "$ORCH/bundle.tar" -o "$WORKDIR/bundle.tar"
+tar -xf "$WORKDIR/bundle.tar" -C "$WORKDIR"
+curl -fsSL "$ORCH/chat.html" -o "$WORKDIR/chat.html" 2>/dev/null
+echo "        OK"
+
+cat <<EOF
+
+  ============================================================
+   Setup complete!
+
+   Opening:
+     - NAT NETWORK NODE worker window  (your contribution)
+     - NAT AI chat in your browser     (your free local AI)
+
+   Close the worker window any time to pause contributing.
+   Your local AI stays installed and usable.
+  ============================================================
+
+EOF
+
+# Spawn the worker in a NEW Terminal window so it stays open after this script exits.
+osascript <<APPLE
+tell application "Terminal"
+    activate
+    do script "cd \"$WORKDIR\" && echo === NAT NETWORK NODE === && echo Server: $ORCH && echo Close this window to stop contributing. && echo && python3 -m worker --server $ORCH --target ollama"
+end tell
+APPLE
+
+# Give the worker ~6s to start the local NAT AI HTTP server on 11500, then open chat.
+sleep 6
+open "http://127.0.0.1:11500/" 2>/dev/null
+
+sleep 3
+echo "You can close this window."
+"""
+
+
+def _render_joiner_command(req) -> str:
+    # Use Python str.format but escape braces in shell ${...} by doubling them above.
+    return _JOINER_COMMAND.format(origin=_origin(req))
+
+
+_REACTIVATE_COMMAND = r"""#!/bin/bash
+# NAT NETWORK macOS reconnect tool.
+set -u
+ORCH="{origin}"
+WORKDIR="$HOME/.nat-network"
+
+clear
+cat <<EOF
+
+  === NAT NETWORK reconnect (macOS) ===
+  Server: $ORCH
+
+EOF
+
+if [ ! -f "$WORKDIR/worker.py" ]; then
+  echo "  [!] No NAT install found at $WORKDIR"
+  echo "      Run the full installer instead (joiner.command)."
+  read -p "Press Enter to exit..." _
+  exit 1
+fi
+
+echo "  [1/4] Stopping any old NAT NETWORK NODE windows..."
+osascript -e 'tell application "Terminal" to close (every window whose name contains "NAT NETWORK NODE")' 2>/dev/null
+echo "        OK"
+
+echo "  [2/4] Ensuring Ollama is running..."
+if ! curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+  brew services start ollama >/dev/null 2>&1 || (nohup ollama serve >/dev/null 2>&1 &)
+  sleep 4
+fi
+echo "        OK"
+
+echo "  [3/4] Refreshing worker code from $ORCH..."
+curl -fsSL "$ORCH/worker.py" -o "$WORKDIR/worker.py" 2>/dev/null
+curl -fsSL "$ORCH/bundle.tar" -o "$WORKDIR/bundle.tar" 2>/dev/null
+tar -xf "$WORKDIR/bundle.tar" -C "$WORKDIR" 2>/dev/null
+curl -fsSL "$ORCH/chat.html" -o "$WORKDIR/chat.html" 2>/dev/null
+echo "        OK"
+
+echo "  [4/4] Launching worker + NAT AI chat..."
+osascript <<APPLE
+tell application "Terminal"
+    activate
+    do script "cd \"$WORKDIR\" && echo === NAT NETWORK NODE === && echo Server: $ORCH && echo && python3 -m worker --server $ORCH --target ollama"
+end tell
+APPLE
+sleep 6
+open "http://127.0.0.1:11500/" 2>/dev/null
+echo
+echo "  Reconnected. You can close this window."
+sleep 4
+"""
+
+
+def _render_reactivate_command(req) -> str:
+    return _REACTIVATE_COMMAND.format(origin=_origin(req))
+
+
+_HANDOFF_COMMAND = r"""#!/bin/bash
+# NAT NETWORK macOS project handoff: pull project tar, extract, copy kickoff prompt
+# to clipboard, open Terminal in the project dir.
+set -u
+ORCH="{origin}"
+DEST="$HOME/nat-network"
+
+clear
+cat <<EOF
+
+  ============================================================
+            NAT NETWORK - HANDOFF TO LOCAL CLAUDE
+  ============================================================
+
+  This will:
+    1. Download the full NAT project from $ORCH
+    2. Extract it to $DEST
+    3. Copy the kickoff prompt to your clipboard
+    4. Open a Terminal in the project folder
+
+  When Claude is ready, paste with Cmd+V and press Enter.
+
+EOF
+read -p "  Type Y to continue, or anything else to abort: " ans
+if [ "${{ans:-}}" != "Y" ] && [ "${{ans:-}}" != "y" ]; then exit 1; fi
+
+mkdir -p "$DEST"
+echo "  [1/3] Downloading project bundle..."
+curl -fsSL "$ORCH/project.tar" -o "$DEST/project.tar" || {{ echo "[!] download failed - is $ORCH reachable from this Mac?"; read -p "Press Enter..." _; exit 1; }}
+tar -xf "$DEST/project.tar" -C "$DEST"
+rm -f "$DEST/project.tar"
+echo "        OK"
+
+echo "  [2/3] Copying kickoff prompt to clipboard..."
+KICKOFF="Read HANDOFF.md and MEMORY/MEMORY.md and every file MEMORY.md references. After you've read them, give me a one-paragraph summary of where we left off so I know you're caught up. Then ask me what to work on next."
+printf "%s" "$KICKOFF" | pbcopy
+echo "        OK (clipboard now has the kickoff message)"
+
+echo "  [3/3] Opening Terminal in $DEST..."
+osascript <<APPLE
+tell application "Terminal"
+    activate
+    do script "cd \"$DEST\" && echo Project ready. Run 'claude' here, then Cmd+V to paste the kickoff prompt."
+end tell
+APPLE
+sleep 3
+echo
+echo "  Done. Switch to the new Terminal window."
+sleep 3
+"""
+
+
+def _render_handoff_command(req) -> str:
+    return _HANDOFF_COMMAND.format(origin=_origin(req))
+
+
 def _render_stop_bat(_req) -> str:
     return _STOP_BAT.replace("\n", "\r\n")
 
@@ -915,10 +1162,16 @@ _CHAT_HTML = r"""<!doctype html>
   .status.ok{color:#5cd693}
   .status.err{color:#ff6b6b}
   #chat{flex:1;overflow-y:auto;padding:1em;display:flex;flex-direction:column;gap:.8em;max-width:760px;width:100%;margin:0 auto}
-  .msg{padding:.7em 1em;border-radius:.6em;max-width:80%;white-space:pre-wrap;word-wrap:break-word;line-height:1.5}
-  .msg.user{align-self:flex-end;background:var(--bub-u);border:1px solid #244a59}
-  .msg.assistant{align-self:flex-start;background:var(--bub-a);border:1px solid #2b3340}
-  .msg.system{align-self:center;background:transparent;color:var(--mute);font-size:.85em;font-style:italic;max-width:none}
+  .msg-row{display:flex;gap:.6em;align-items:flex-start;max-width:85%}
+  .msg-row.user{align-self:flex-end;flex-direction:row-reverse}
+  .msg-row.assistant{align-self:flex-start}
+  .msg-row.system{align-self:center;max-width:none}
+  .avatar{width:36px;height:36px;border-radius:50%;flex-shrink:0;background:#1a1f27;border:1px solid #2b3340;overflow:hidden}
+  .avatar img{width:100%;height:100%;display:block}
+  .msg{padding:.7em 1em;border-radius:.6em;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;flex:1;min-width:0}
+  .msg.user{background:var(--bub-u);border:1px solid #244a59}
+  .msg.assistant{background:var(--bub-a);border:1px solid #2b3340}
+  .msg.system{background:transparent;color:var(--mute);font-size:.85em;font-style:italic;text-align:center}
   form{display:flex;gap:.5em;padding:1em;background:#0b0f15;border-top:1px solid #1a1f27;max-width:760px;width:100%;margin:0 auto}
   textarea{flex:1;resize:none;min-height:2.6em;max-height:8em;padding:.6em .8em;background:#1a1f27;color:var(--fg);border:1px solid #2b3340;border-radius:.4em;font:inherit}
   button{padding:0 1.2em;background:var(--accent);color:#000;border:0;border-radius:.4em;font-weight:700;cursor:pointer}
@@ -937,7 +1190,22 @@ _CHAT_HTML = r"""<!doctype html>
   .contrib-toggle{cursor:pointer;color:var(--accent);font-weight:600;font-size:.8em;background:transparent;border:0;padding:0}
 </style></head>
 <body>
-<div class=banner>NAT AI &middot; LOCAL MODEL</div>
+<div class=banner>
+  <svg viewBox="0 0 28 28" width=22 height=22 style="vertical-align:-5px;margin-right:.5em;filter:drop-shadow(0 0 4px #0bc)" aria-hidden="true">
+    <defs>
+      <linearGradient id="ng" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0bc"/><stop offset="1" stop-color="#6f3"/></linearGradient>
+    </defs>
+    <circle cx="14" cy="14" r="3.2" fill="url(#ng)"/>
+    <circle cx="5" cy="6" r="1.8" fill="#0bc"/>
+    <circle cx="23" cy="6" r="1.8" fill="#0bc"/>
+    <circle cx="5" cy="22" r="1.8" fill="#0bc"/>
+    <circle cx="23" cy="22" r="1.8" fill="#0bc"/>
+    <line x1="14" y1="14" x2="5" y2="6" stroke="#0bc" stroke-width="0.7" opacity="0.6"/>
+    <line x1="14" y1="14" x2="23" y2="6" stroke="#0bc" stroke-width="0.7" opacity="0.6"/>
+    <line x1="14" y1="14" x2="5" y2="22" stroke="#0bc" stroke-width="0.7" opacity="0.6"/>
+    <line x1="14" y1="14" x2="23" y2="22" stroke="#0bc" stroke-width="0.7" opacity="0.6"/>
+  </svg>NAT AI &middot; LOCAL MODEL
+</div>
 <div class=topbar>
   <div>Model: <code id=model>qwen2.5-coder:1.5b</code></div>
   <div>Mode:
@@ -1016,6 +1284,16 @@ const MEM_KEEP_RECENT = 12;       // keep this many most-recent turns verbatim
 let history = JSON.parse(localStorage.getItem(MEM_KEY) || '[]');
 let memorySummary = localStorage.getItem(MEM_SUMMARY_KEY) || '';
 let MODEL = "qwen2.5-coder:1.5b";
+
+// Per-device stable seed for the user's avatar. Generated once, persisted in localStorage.
+const DEVICE_KEY = 'nat_ai_device_seed';
+let deviceSeed = localStorage.getItem(DEVICE_KEY);
+if (!deviceSeed) {
+  deviceSeed = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  localStorage.setItem(DEVICE_KEY, deviceSeed);
+}
+const AVATAR_USER = `https://api.dicebear.com/8.x/pixel-art-neutral/svg?seed=${encodeURIComponent(deviceSeed)}&size=72&backgroundColor=1a1f27`;
+const AVATAR_AI   = `https://api.dicebear.com/8.x/bottts-neutral/svg?seed=NAT-AI&size=72&backgroundColor=0c1a1f&primaryColor=00bbcc`;
 
 function saveMemory() {
   localStorage.setItem(MEM_KEY, JSON.stringify(history));
@@ -1143,12 +1421,32 @@ const MODE_PROMPTS = {
 const FINANCE_MODES = new Set(['web3']);
 
 function addMsg(role, text){
-  const d = document.createElement('div');
-  d.className = 'msg ' + role;
-  d.textContent = text;
-  chat.appendChild(d);
+  if (role === 'system') {
+    // System messages stay simple (no avatar) — preserve old behavior
+    const d = document.createElement('div');
+    d.className = 'msg system';
+    d.textContent = text;
+    chat.appendChild(d);
+    chat.scrollTop = chat.scrollHeight;
+    return d;
+  }
+  const row = document.createElement('div');
+  row.className = 'msg-row ' + role;
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  const img = document.createElement('img');
+  img.alt = role === 'user' ? 'you' : 'NAT AI';
+  img.src = role === 'user' ? AVATAR_USER : AVATAR_AI;
+  img.onerror = () => { img.style.display = 'none'; av.textContent = role === 'user' ? '👤' : '🤖'; av.style.display='flex'; av.style.alignItems='center'; av.style.justifyContent='center'; av.style.fontSize='20px'; };
+  av.appendChild(img);
+  const bubble = document.createElement('div');
+  bubble.className = 'msg ' + role;
+  bubble.textContent = text;
+  row.appendChild(av);
+  row.appendChild(bubble);
+  chat.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
-  return d;
+  return bubble;
 }
 
 async function checkOllama(){
@@ -1364,7 +1662,7 @@ def _render_join_page(req) -> str:
 <div class=card>
 <h2 style="margin-top:.2em">Windows — one tap</h2>
 <ol>
-  <li><a class="btn big" href="/joiner.bat" download>Download node installer</a></li>
+  <li><a class="btn big" href="/joiner.bat" download>Download node installer (Windows)</a></li>
   <li>Open Downloads, double-click <code>nat-network-joiner.bat</code></li>
   <li>If Windows shows "Windows protected your PC" → <b>More info</b> → <b>Run anyway</b></li>
   <li>Read the consent screen, press <code>Y</code> to join</li>
@@ -1372,6 +1670,18 @@ def _render_join_page(req) -> str:
 </ol>
 <p class=mute><small>Tested on Windows 10/11. Requires <code>winget</code> (built into recent Windows) — if winget is missing, the installer tells you where to get Python and Ollama manually.</small></p>
 <p><a class="btn alt" href="/stop.bat" download>Download stop tool</a> <span class=mute><small>closes the worker; local model stays installed.</small></span></p>
+</div>
+
+<div class=card>
+<h2 style="margin-top:.2em">macOS — one tap</h2>
+<ol>
+  <li><a class="btn big" href="/joiner-mac.zip" download>Download node installer (macOS)</a></li>
+  <li>Open Downloads — the <code>.zip</code> auto-extracts to <code>nat-network-joiner.command</code></li>
+  <li>Double-click the <code>.command</code> file. If macOS blocks it ("can't be opened because Apple cannot check it"), <b>right-click → Open → Open</b> once. After that double-click works.</li>
+  <li>Read the consent prompt in Terminal, type <code>Y</code> and Enter</li>
+  <li>Installer auto-installs Homebrew (if missing) and Ollama, pulls the model, opens the <b>NAT NETWORK NODE</b> Terminal window</li>
+</ol>
+<p class=mute><small>Tested on macOS 13+. Apple Silicon and Intel both supported. Reconnect tool: <a href="/reactivate-mac.zip">reactivate-mac.zip</a> &middot; Project handoff: <a href="/handoff-mac.zip">handoff-mac.zip</a>.</small></p>
 </div>
 
 <div class=card>
@@ -1514,6 +1824,15 @@ def make_handler(queue: Queue):
                 return self._send_text(200, _render_bootstrap_py(self), content_type="text/x-python")
             if self.path == "/joiner.bat":
                 return self._send_attachment(200, _render_joiner_bat(self), filename="nat-network-joiner.bat", content_type="application/x-bat")
+            if self.path == "/joiner-mac.zip":
+                return self._send_zip_attachment(200, "nat-network-joiner.command", _render_joiner_command(self),
+                                                  zip_filename="nat-network-joiner.zip")
+            if self.path == "/reactivate-mac.zip":
+                return self._send_zip_attachment(200, "nat-reactivate.command", _render_reactivate_command(self),
+                                                  zip_filename="nat-reactivate.zip")
+            if self.path == "/handoff-mac.zip":
+                return self._send_zip_attachment(200, "nat-handoff.command", _render_handoff_command(self),
+                                                  zip_filename="nat-handoff.zip")
             if self.path == "/stop.bat":
                 return self._send_attachment(200, _render_stop_bat(self), filename="nat-network-stop.bat", content_type="application/x-bat")
             if self.path == "/chat" or self.path == "/chat.html":
@@ -1557,6 +1876,24 @@ def make_handler(queue: Queue):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_zip_attachment(self, code: int, inner_filename: str, inner_text: str, zip_filename: str) -> None:
+            """Wrap a .command file in a ZIP with the executable bit set so macOS double-click works."""
+            import io
+            import zipfile
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                info = zipfile.ZipInfo(inner_filename)
+                # Unix file type (regular file = 0o100000) | mode 0o755 (rwx for owner, rx for others)
+                info.external_attr = (0o100755 & 0xFFFF) << 16
+                z.writestr(info, inner_text)
+            body = buf.getvalue()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{zip_filename}"')
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
