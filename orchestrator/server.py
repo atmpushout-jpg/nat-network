@@ -1605,6 +1605,23 @@ def _build_bundle() -> bytes:
     return buf.getvalue()
 
 
+def _render_live_report(queue: "Queue") -> str:
+    """Generate the customer-facing HTML safety report from completed probes."""
+    import glob as _glob
+    import sys as _sys
+    repo_root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+    if repo_root not in _sys.path:
+        _sys.path.insert(0, repo_root)
+    from node.jailbreak.report import load_probes, render_html
+    paths = sorted(_glob.glob(os.path.join(queue.done_dir, "*.json")))
+    probes = []
+    for p in load_probes(paths):
+        # done/ holds raw worker posts; keep only ones with a verdict
+        if p.get("verdict"):
+            probes.append(p)
+    return render_html(probes)
+
+
 def _build_full_project_bundle() -> bytes:
     """Tar of the entire agent-farm project (excluding caches, queue state, trajectories).
 
@@ -1814,6 +1831,8 @@ def make_handler(queue: Queue):
                 return self._send_json(200, job)
             if self.path == "/status":
                 return self._send_json(200, queue.status())
+            if self.path == "/report":
+                return self._send_html(200, _render_live_report(queue))
             if self.path == "/" or self.path == "/join":
                 return self._send_html(200, _render_join_page(self))
             if self.path == "/bootstrap.sh":
